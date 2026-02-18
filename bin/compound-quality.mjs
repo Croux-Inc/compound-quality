@@ -58,11 +58,16 @@ function parseTypeErrors(output) {
   return countMatches(stripAnsi(output), /error TS\d+:/g);
 }
 
-function parseLintViolations(output) {
+function parseLintViolations(output, exitCode) {
   const normalized = stripAnsi(output);
   const exact = normalized.match(/Found\s+(\d+)\s+errors?/i);
   if (exact) return Number(exact[1]);
-  return countMatches(normalized, /\berror\b/gi);
+
+  if (exitCode === 0) return 0;
+
+  return normalized
+    .split("\n")
+    .filter((line) => /\berror\b/i.test(line) && !/\bno errors?\b/i.test(line)).length;
 }
 
 function parseTests(output) {
@@ -295,7 +300,9 @@ async function runReflect(configPathArg) {
 
   const coverage = await readCoveragePct(root, config.coverage);
   const typeErrors = parseTypeErrors(allOutput);
-  const lintViolations = parseLintViolations(allOutput);
+  const lintResult = commandResults.find((result) => result.name === "lint");
+  const lintOutput = `${lintResult?.stdout ?? ""}\n${lintResult?.stderr ?? ""}`;
+  const lintViolations = parseLintViolations(lintOutput, lintResult?.exitCode ?? 1);
   const tests = parseTests(allOutput);
 
   const testExitCode = commandResults.find((result) => result.name === "test")?.exitCode ?? 1;
@@ -462,4 +469,3 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
-
