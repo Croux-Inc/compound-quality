@@ -1,0 +1,39 @@
+{
+  "$schema": "../../schemas/compound-quality.schema.json",
+  "version": 1,
+  "qualityDir": ".quality",
+  "commands": {
+    "typecheck": "pnpm turbo typecheck",
+    "lint": "pnpm lint",
+    "test": "pnpm turbo test -- --coverage",
+    "build": "pnpm build"
+  },
+  "coverage": {
+    "packageDirs": ["shared", "daemon", "web"],
+    "summaryFile": "coverage/coverage-summary.json",
+    "expectedPackages": 3
+  },
+  "patterns": {
+    "claudeRuleThreshold": 3,
+    "lintRuleThreshold": 5,
+    "rules": [
+      { "key": "cannot_find_module", "pattern": "Cannot find module", "flags": "gi" },
+      { "key": "type_mismatch", "pattern": "is not assignable to type", "flags": "gi" },
+      {
+        "key": "unused_symbol",
+        "pattern": "unused (import|variable|parameter|private class member)",
+        "flags": "gi"
+      },
+      { "key": "formatting_violation", "pattern": "Formatter would have printed", "flags": "gi" },
+      { "key": "missing_test_coverage", "pattern": "coverage.*below|No test files found", "flags": "gi" }
+    ]
+  },
+  "weights": {
+    "typeSafety": 0.25,
+    "testHealth": 0.3,
+    "lintCompliance": 0.15,
+    "coverageLevel": 0.2,
+    "buildStability": 0.1
+  },
+  "maxSuggestedUpdateFiles": 25
+}

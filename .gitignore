@@ -1,0 +1,4 @@
+node_modules/
+.quality/
+coverage/
+.DS_Store

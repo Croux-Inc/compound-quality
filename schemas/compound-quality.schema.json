@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/croux-inc/compound-quality/schemas/compound-quality.schema.json",
+  "title": "Compound Quality Config",
+  "type": "object",
+  "required": ["version", "commands", "coverage"],
+  "properties": {
+    "version": { "type": "number" },
+    "qualityDir": { "type": "string" },
+    "commands": {
+      "type": "object",
+      "required": ["typecheck", "lint", "test", "build"],
+      "properties": {
+        "typecheck": { "type": "string" },
+        "lint": { "type": "string" },
+        "test": { "type": "string" },
+        "build": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["packageDirs"],
+      "properties": {
+        "packageDirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "summaryFile": { "type": "string" },
+        "expectedPackages": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "patterns": {
+      "type": "object",
+      "properties": {
+        "claudeRuleThreshold": { "type": "number" },
+        "lintRuleThreshold": { "type": "number" },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "pattern"],
+            "properties": {
+              "key": { "type": "string" },
+              "pattern": { "type": "string" },
+              "flags": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "weights": {
+      "type": "object",
+      "properties": {
+        "typeSafety": { "type": "number" },
+        "testHealth": { "type": "number" },
+        "lintCompliance": { "type": "number" },
+        "coverageLevel": { "type": "number" },
+        "buildStability": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "maxSuggestedUpdateFiles": { "type": "number" }
+  },
+  "additionalProperties": true
+}

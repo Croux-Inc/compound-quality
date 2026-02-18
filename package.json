@@ -1,0 +1,26 @@
+{
+  "name": "@croux-inc/compound-quality",
+  "version": "0.1.0",
+  "description": "Config-driven quality reflection CLI for compound engineering loops",
+  "type": "module",
+  "bin": {
+    "compound-quality": "bin/compound-quality.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "schemas"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/croux-inc/compound-quality.git"
+  },
+  "homepage": "https://github.com/croux-inc/compound-quality#readme",
+  "bugs": {
+    "url": "https://github.com/croux-inc/compound-quality/issues"
+  }
+}
