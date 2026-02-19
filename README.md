@@ -61,6 +61,17 @@ git push origin main --follow-tags
 npm view @croux-inc/compound-quality version --registry=https://npm.pkg.github.com
 ```
 
+If Actions are disabled or package publish fails, publish manually:
+
+```bash
+export NODE_AUTH_TOKEN=ghp_xxx   # token with write:packages
+npm publish --registry=https://npm.pkg.github.com
+```
+
+Note:
+- GitHub "Release" entries and GitHub Packages versions are separate.
+- Creating a Release/tag alone does not publish a package.
+
 `publishConfig.registry` is preconfigured in `package.json` for GitHub Packages.
 
 ## Usage
