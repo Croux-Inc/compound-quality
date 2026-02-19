@@ -34,21 +34,31 @@ function printUsage() {
   console.log("  compound-quality init --config <path>");
   console.log("  compound-quality reflect --config <path>");
   console.log("  compound-quality dispatch --config <path>");
+  console.log("  compound-quality ralph-loop <start|pause|status|step> --config <path> [--json]");
+  console.log("  compound-quality rw <start|pause|status|step> --config <path> [--json]");
 }
 
 function parseArgs(argv) {
   const args = [...argv];
   const mode = args.shift() ?? "reflect";
   let configPath = ".compound-quality.json";
+  let json = false;
+  const positionals = [];
 
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === "--config" && args[i + 1]) {
       configPath = args[i + 1];
       i += 1;
+      continue;
     }
+    if (args[i] === "--json") {
+      json = true;
+      continue;
+    }
+    positionals.push(args[i]);
   }
 
-  return { mode, configPath };
+  return { mode, configPath, action: positionals[0], json };
 }
 
 function countMatches(input, expression) {
@@ -255,7 +265,7 @@ async function discoverPackageDirs(root) {
   return ["shared", "daemon", "web"];
 }
 
-async function createDefaultConfig(configPath, root) {
+async function createDefaultConfig(configPath, root, options = {}) {
   const rootPackageJson = await loadJson(join(root, "package.json"));
   const scripts = rootPackageJson?.scripts ?? {};
 
@@ -286,7 +296,9 @@ async function createDefaultConfig(configPath, root) {
   };
 
   await writeFile(configPath, `${JSON.stringify(defaultConfig, null, 2)}\n`, "utf8");
-  console.log(`Created default config at ${configPath}`);
+  if (!options.silent) {
+    console.log(`Created default config at ${configPath}`);
+  }
 }
 
 async function readCoveragePct(root, coverageConfig) {
@@ -599,11 +611,12 @@ async function writeDispatchBundle({ root, qualityDir, scorecard, patternsFile, 
   };
 }
 
-async function runReflect(configPathArg) {
+async function runReflect(configPathArg, options = {}) {
+  const quiet = options.quiet === true;
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
   if (!existsSync(configPath)) {
-    await createDefaultConfig(configPath, root);
+    await createDefaultConfig(configPath, root, { silent: quiet });
   }
 
   const userConfig = JSON.parse(await readFile(configPath, "utf8"));
@@ -773,9 +786,11 @@ async function runReflect(configPathArg) {
     }
   }
 
-  console.log(`Quality score: ${scorecard.score.overall}`);
-  console.log(`Coverage floor: ${scorecard.thresholds.coverageFloor}`);
-  console.log(`Action items: ${scorecard.actionItems.length}`);
+  if (!quiet) {
+    console.log(`Quality score: ${scorecard.score.overall}`);
+    console.log(`Coverage floor: ${scorecard.thresholds.coverageFloor}`);
+    console.log(`Action items: ${scorecard.actionItems.length}`);
+  }
   const dispatch = await writeDispatchBundle({
     root,
     qualityDir,
@@ -783,8 +798,10 @@ async function runReflect(configPathArg) {
     patternsFile,
     configPathArg,
   });
-  console.log(`Dispatch tasks: ${dispatch.taskCount}`);
-  console.log(`Dispatch plan: ${dispatch.planPath}`);
+  if (!quiet) {
+    console.log(`Dispatch tasks: ${dispatch.taskCount}`);
+    console.log(`Dispatch plan: ${dispatch.planPath}`);
+  }
 
   const failedCommands = commandResults.filter((result) => result.exitCode !== 0);
   if (failedCommands.length > 0) {
@@ -819,13 +836,19 @@ async function runInit(configPathArg) {
     await writeFile(rootPackagePath, `${JSON.stringify(rootPackageJson, null, 2)}\n`, "utf8");
     console.log('Added script "reflect" to package.json');
   }
+  if (!scripts["reflect:rw"]) {
+    scripts["reflect:rw"] = `compound-quality rw step --config ${configPathArg} --json`;
+    rootPackageJson.scripts = scripts;
+    await writeFile(rootPackagePath, `${JSON.stringify(rootPackageJson, null, 2)}\n`, "utf8");
+    console.log('Added script "reflect:rw" to package.json');
+  }
 }
 
 async function runDispatch(configPathArg) {
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
   if (!existsSync(configPath)) {
-    await createDefaultConfig(configPath, root);
+    await createDefaultConfig(configPath, root, { silent: asJson });
   }
 
   const userConfig = JSON.parse(await readFile(configPath, "utf8"));
@@ -854,8 +877,144 @@ async function runDispatch(configPathArg) {
   console.log(`Dispatch plan: ${dispatch.planPath}`);
 }
 
+async function runRalphLoop(configPathArg, actionArg, asJson = false) {
+  const action = (actionArg ?? "step").toLowerCase();
+  const validActions = new Set(["start", "pause", "status", "step"]);
+  if (!validActions.has(action)) {
+    throw new Error(`Unknown ralph-loop action "${action}". Use start, pause, status, or step.`);
+  }
+
+  const root = resolve(process.cwd());
+  const configPath = resolve(root, configPathArg);
+  if (!existsSync(configPath)) {
+    await createDefaultConfig(configPath, root);
+  }
+
+  const userConfig = JSON.parse(await readFile(configPath, "utf8"));
+  const config = normalizeConfig(userConfig);
+  const qualityDir = join(root, config.qualityDir);
+  const dispatchDir = join(qualityDir, "dispatch");
+  const controlPath = join(dispatchDir, "ralph-control.json");
+  const statePath = join(dispatchDir, "ralph-loop.json");
+  const planPath = join(dispatchDir, "plan.json");
+  const scorecardPath = join(qualityDir, "scorecard.json");
+
+  await mkdir(dispatchDir, { recursive: true });
+  const control = (await loadJson(controlPath)) ?? { version: 1, paused: false, updatedAt: null };
+
+  if (action === "pause") {
+    const nextControl = { version: 1, paused: true, updatedAt: new Date().toISOString() };
+    await writeFile(controlPath, `${JSON.stringify(nextControl, null, 2)}\n`, "utf8");
+    const result = {
+      action: "pause",
+      paused: true,
+      controlPath: relative(root, controlPath),
+    };
+    if (asJson) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log("Ralph loop paused");
+      console.log(`Control file: ${result.controlPath}`);
+    }
+    return;
+  }
+
+  if (action === "start") {
+    const nextControl = { version: 1, paused: false, updatedAt: new Date().toISOString() };
+    await writeFile(controlPath, `${JSON.stringify(nextControl, null, 2)}\n`, "utf8");
+  }
+
+  if (action === "status") {
+    const state = await loadJson(statePath);
+    const result = {
+      action: "status",
+      paused: Boolean(control.paused),
+      controlPath: relative(root, controlPath),
+      statePath: relative(root, statePath),
+      state: state ?? null,
+    };
+    if (asJson) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(`Ralph loop paused: ${result.paused ? "yes" : "no"}`);
+      if (state?.nextTask?.promptPath) {
+        console.log(`Next task: ${state.nextTask.title}`);
+        console.log(`Prompt: ${state.nextTask.promptPath}`);
+      } else if (state) {
+        console.log(`Status: ${state.status}`);
+      } else {
+        console.log("No loop state yet. Run: compound-quality ralph-loop step");
+      }
+    }
+    return;
+  }
+
+  const currentControl = (await loadJson(controlPath)) ?? control;
+  if (currentControl.paused) {
+    const pausedResult = {
+      action: "step",
+      paused: true,
+      message: "Ralph loop is paused. Run 'compound-quality ralph-loop start' to resume.",
+    };
+    if (asJson) {
+      console.log(JSON.stringify(pausedResult, null, 2));
+    } else {
+      console.log(pausedResult.message);
+    }
+    return;
+  }
+
+  await runReflect(configPathArg, { quiet: asJson });
+  process.exitCode = 0;
+
+  const scorecard = await loadJson(scorecardPath);
+  const plan = await loadJson(planPath);
+  if (!scorecard || !plan) {
+    throw new Error("Missing dispatch artifacts after reflect. Expected scorecard and plan.");
+  }
+
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+  const topTask = tasks[0] ?? null;
+  const status = !topTask || topTask.category === "maintenance" ? "green" : "needs_work";
+  const loopState = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    status,
+    score: scorecard?.score?.overall ?? 0,
+    paused: false,
+    taskCount: tasks.length,
+    nextTask: topTask
+      ? {
+          id: topTask.id,
+          title: topTask.title,
+          ownerProfile: topTask.ownerProfile,
+          promptPath: topTask.promptPath,
+          verificationCommand: topTask.verificationCommand,
+        }
+      : null,
+    paths: {
+      scorecard: relative(root, scorecardPath),
+      plan: relative(root, planPath),
+      queue: relative(root, join(dispatchDir, "QUEUE.md")),
+    },
+  };
+  await writeFile(statePath, `${JSON.stringify(loopState, null, 2)}\n`, "utf8");
+
+  if (asJson) {
+    console.log(JSON.stringify(loopState, null, 2));
+  } else {
+    console.log(`Ralph loop status: ${loopState.status}`);
+    console.log(`Quality score: ${loopState.score}`);
+    console.log(`Task count: ${loopState.taskCount}`);
+    if (loopState.nextTask) {
+      console.log(`Next prompt: ${loopState.nextTask.promptPath}`);
+    }
+    console.log(`Loop state: ${relative(root, statePath)}`);
+  }
+}
+
 async function main() {
-  const { mode, configPath } = parseArgs(process.argv.slice(2));
+  const { mode, configPath, action, json } = parseArgs(process.argv.slice(2));
   if (mode === "init") {
     await runInit(configPath);
     return;
@@ -866,6 +1025,10 @@ async function main() {
   }
   if (mode === "dispatch") {
     await runDispatch(configPath);
+    return;
+  }
+  if (mode === "ralph-loop" || mode === "rw" || mode === "ralph") {
+    await runRalphLoop(configPath, action, json);
     return;
   }
   printUsage();

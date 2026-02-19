@@ -9,7 +9,7 @@ It runs your quality commands, computes a score, ratchets coverage floors, detec
 For internal teams, the lowest-friction path is install from a tagged GitHub release:
 
 ```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.6
+pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.7
 npx compound-quality init
 pnpm reflect
 ```
@@ -19,6 +19,7 @@ What this does:
 - creates `.compound-quality.json` if missing,
 - adds `"reflect"` script to your `package.json` if missing.
 - generates a prioritized dispatch queue for agents under `.quality/dispatch/`.
+- adds `"reflect:rw"` script for Ralph Wiggum loop integration.
 
 ## Install (GitHub Packages)
 
@@ -111,6 +112,23 @@ compound-quality dispatch --config .compound-quality.json
 3. Assign the top prompt from `.quality/dispatch/prompts/*.md` to an agent.
 4. Merge the fix, then rerun `pnpm reflect`.
 5. Repeat until only prevention/maintenance tasks remain.
+
+## Ralph Wiggum Loop
+
+Use the built-in Ralph loop mode:
+
+```bash
+pnpm reflect:rw               # equivalent to: compound-quality rw step --config .compound-quality.json --json
+compound-quality rw status
+compound-quality rw pause
+compound-quality rw start
+```
+
+Outputs:
+- `.quality/dispatch/ralph-loop.json` (machine-readable current loop state)
+- `.quality/dispatch/ralph-control.json` (pause/resume control)
+
+`rw` and `ralph` are aliases for `ralph-loop`.
 
 Or via package scripts:
 
