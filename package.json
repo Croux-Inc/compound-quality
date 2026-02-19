@@ -1,6 +1,6 @@
 {
   "name": "@croux-inc/compound-quality",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Config-driven quality reflection CLI for compound engineering loops",
   "type": "module",
   "bin": {

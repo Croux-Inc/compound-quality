@@ -30,7 +30,9 @@ const DEFAULT_COMMANDS = {
 };
 
 function printUsage() {
-  console.log("Usage: compound-quality reflect --config <path>");
+  console.log("Usage:");
+  console.log("  compound-quality init --config <path>");
+  console.log("  compound-quality reflect --config <path>");
 }
 
 function parseArgs(argv) {
@@ -524,13 +526,47 @@ async function runReflect(configPathArg) {
   }
 }
 
+async function runInit(configPathArg) {
+  const root = resolve(process.cwd());
+  const configPath = resolve(root, configPathArg);
+  const configExists = existsSync(configPath);
+  if (!configExists) {
+    await createDefaultConfig(configPath, root);
+  } else {
+    console.log(`Config already exists at ${configPath}`);
+  }
+
+  const rootPackagePath = join(root, "package.json");
+  if (!existsSync(rootPackagePath)) {
+    return;
+  }
+
+  const rootPackageJson = await loadJson(rootPackagePath);
+  if (!rootPackageJson || typeof rootPackageJson !== "object") {
+    return;
+  }
+
+  const scripts = typeof rootPackageJson.scripts === "object" && rootPackageJson.scripts ? rootPackageJson.scripts : {};
+  if (!scripts.reflect) {
+    scripts.reflect = `compound-quality reflect --config ${configPathArg}`;
+    rootPackageJson.scripts = scripts;
+    await writeFile(rootPackagePath, `${JSON.stringify(rootPackageJson, null, 2)}\n`, "utf8");
+    console.log('Added script "reflect" to package.json');
+  }
+}
+
 async function main() {
   const { mode, configPath } = parseArgs(process.argv.slice(2));
-  if (mode !== "reflect") {
-    printUsage();
-    process.exit(1);
+  if (mode === "init") {
+    await runInit(configPath);
+    return;
   }
-  await runReflect(configPath);
+  if (mode === "reflect") {
+    await runReflect(configPath);
+    return;
+  }
+  printUsage();
+  process.exit(1);
 }
 
 main().catch((error) => {
