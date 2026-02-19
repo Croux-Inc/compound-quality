@@ -7,8 +7,9 @@ It runs your quality commands, computes a score, ratchets coverage floors, detec
 ## Install (Private)
 
 This package is intentionally **not** published to the public npm registry.
+Install from GitHub Packages (not from a git URL) so everyone gets the same released artifact.
 
-### Option 1: GitHub Packages (recommended)
+### Team Install
 
 1. Create a GitHub token with `read:packages` (and SSO enabled for your org if required).
 2. Configure npm auth:
@@ -32,33 +33,29 @@ export GITHUB_PACKAGES_TOKEN=ghp_xxx
 pnpm add -D @croux-inc/compound-quality
 ```
 
-### Option 2: Install directly from private GitHub repo
-
-```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.3
-```
-
-Pin to a tag (`#vX.Y.Z`) so all team members use the same version.
-
 ## Publish (Maintainers)
 
-1. Bump the package version:
+1. Ensure `main` contains the release changes.
+2. Bump the package version:
 
 ```bash
 npm version patch
 ```
 
-2. Push commit + tag:
+3. Push commit + tag:
 
 ```bash
 git push origin main --follow-tags
 ```
 
-3. GitHub Actions publishes automatically from tag `v*` via:
+4. GitHub Actions publishes automatically from tag `v*` via:
 
 `/.github/workflows/publish-private-package.yml`
 
-4. Verify:
+5. Verify publish succeeded:
+
+- In GitHub: Actions -> `Publish Private Package` run for the tag.
+- In terminal (with auth token):
 
 ```bash
 npm view @croux-inc/compound-quality version --registry=https://npm.pkg.github.com
