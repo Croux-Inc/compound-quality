@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import process from "node:process";
 
 const REQUIRED_COMMAND_NAMES = ["typecheck", "lint", "test", "build"];
@@ -33,6 +33,7 @@ function printUsage() {
   console.log("Usage:");
   console.log("  compound-quality init --config <path>");
   console.log("  compound-quality reflect --config <path>");
+  console.log("  compound-quality dispatch --config <path>");
 }
 
 function parseArgs(argv) {
@@ -342,6 +343,262 @@ function runCommand(root, name, command) {
   };
 }
 
+function slugify(input) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+function buildDispatchTasks(scorecard, patternsFile) {
+  const tasks = [];
+  const metrics = scorecard.metrics ?? {};
+  const thresholds = scorecard.thresholds ?? {};
+  const commandResults = Array.isArray(scorecard.commandResults) ? scorecard.commandResults : [];
+  const buildResult = commandResults.find((result) => result.name === "build");
+
+  if ((buildResult?.exitCode ?? 0) !== 0) {
+    tasks.push({
+      id: "build-stability",
+      priority: 100,
+      ownerProfile: "build-fix-agent",
+      category: "stability",
+      title: "Stabilize build pipeline",
+      reason: "Build command failed in latest reflect run.",
+      successCriteria: [
+        "Build command exits with code 0.",
+        "No regressions in quality commands.",
+      ],
+      verificationCommand: "pnpm run build",
+    });
+  }
+
+  if ((metrics.typeErrors ?? 0) > 0) {
+    tasks.push({
+      id: "type-errors",
+      priority: 90,
+      ownerProfile: "typescript-fix-agent",
+      category: "correctness",
+      title: `Fix ${metrics.typeErrors} TypeScript errors`,
+      reason: "Type errors reduce type safety and block reliable releases.",
+      successCriteria: [
+        "Typecheck command exits with code 0.",
+        "No new lint or test failures introduced.",
+      ],
+      verificationCommand: "pnpm run typecheck",
+    });
+  }
+
+  if ((metrics.testsFailed ?? 0) > 0) {
+    tasks.push({
+      id: "test-failures",
+      priority: 80,
+      ownerProfile: "test-fix-agent",
+      category: "quality-gates",
+      title: `Fix ${metrics.testsFailed} failing tests`,
+      reason: "Failing tests indicate functional regressions or unstable test harness.",
+      successCriteria: [
+        "Test command exits with code 0.",
+        "Failures are fixed without reducing test coverage intent.",
+      ],
+      verificationCommand: "pnpm run test",
+    });
+  }
+
+  if ((metrics.lintViolations ?? 0) > 0) {
+    tasks.push({
+      id: "lint-violations",
+      priority: 70,
+      ownerProfile: "lint-fix-agent",
+      category: "hygiene",
+      title: `Resolve ${metrics.lintViolations} lint violations`,
+      reason: "Lint violations create noise and hide real defects.",
+      successCriteria: [
+        "Lint command exits with code 0.",
+        "Code style remains consistent with existing rules.",
+      ],
+      verificationCommand: "pnpm run lint",
+    });
+  }
+
+  const coverageQualified = Boolean(thresholds.coverageQualified);
+  const coveragePct = Number(metrics.coveragePct ?? 0);
+  const coverageFloor = Number(thresholds.coverageFloor ?? 0);
+  if (!coverageQualified || coveragePct < coverageFloor) {
+    const reason = !coverageQualified
+      ? "Coverage data was incomplete for expected packages."
+      : `Coverage ${coveragePct.toFixed(2)}% is below floor ${coverageFloor.toFixed(2)}%.`;
+    tasks.push({
+      id: "coverage-health",
+      priority: 60,
+      ownerProfile: "test-authoring-agent",
+      category: "coverage",
+      title: "Restore coverage health",
+      reason,
+      successCriteria: [
+        "Coverage is collected for all expected packages.",
+        "Coverage meets or exceeds current floor.",
+      ],
+      verificationCommand: "pnpm run test -- --coverage",
+    });
+  }
+
+  const patternEntries = Object.entries(patternsFile?.patterns ?? {});
+  patternEntries
+    .filter(([, data]) => data?.recommendation === "claude_rule" || data?.recommendation === "lint_rule")
+    .sort((a, b) => (b[1]?.count ?? 0) - (a[1]?.count ?? 0))
+    .forEach(([key, data]) => {
+      const recommendation = data?.recommendation;
+      tasks.push({
+        id: `pattern-${slugify(key)}`,
+        priority: recommendation === "lint_rule" ? 50 : 40,
+        ownerProfile: recommendation === "lint_rule" ? "lint-rule-agent" : "policy-agent",
+        category: "prevention",
+        title: `Promote prevention for pattern: ${key}`,
+        reason: `Pattern seen ${data?.count ?? 0} times; recommendation: ${recommendation}.`,
+        successCriteria:
+          recommendation === "lint_rule"
+            ? ["Add or update lint rule to prevent recurrence.", "Document autofix or migration guidance."]
+            : ["Add a CLAUDE.md / agent policy rule.", "Reference concrete example and prevention check."],
+        verificationCommand: recommendation === "lint_rule" ? "pnpm run lint" : "pnpm run typecheck",
+      });
+    });
+
+  if (tasks.length === 0) {
+    tasks.push({
+      id: "maintain-quality",
+      priority: 10,
+      ownerProfile: "maintenance-agent",
+      category: "maintenance",
+      title: "Maintain quality baseline",
+      reason: "No active regressions detected in latest run.",
+      successCriteria: [
+        "Review top recurring pattern and decide if new prevention rule is needed.",
+        "Keep quality loop running on each PR.",
+      ],
+      verificationCommand: "pnpm run build",
+    });
+  }
+
+  return tasks.sort((a, b) => b.priority - a.priority);
+}
+
+function renderDispatchPrompt(task, planPath, scorecardPath, patternsPath, configPath) {
+  return [
+    `# ${task.title}`,
+    "",
+    "## Objective",
+    `${task.reason}`,
+    "",
+    "## Inputs",
+    `- Config: ${configPath}`,
+    `- Scorecard: ${scorecardPath}`,
+    `- Patterns: ${patternsPath}`,
+    `- Plan: ${planPath}`,
+    "",
+    "## Constraints",
+    "- Make minimal, targeted changes.",
+    "- Do not broaden scope beyond this task.",
+    "- Preserve existing behavior outside the defect area.",
+    "",
+    "## Success Criteria",
+    ...task.successCriteria.map((item) => `- ${item}`),
+    "",
+    "## Verification",
+    `- Run: ${task.verificationCommand}`,
+    "",
+    "## Deliverables",
+    "- Summary of root cause.",
+    "- Files changed and why.",
+    "- Residual risks or follow-ups.",
+    "",
+  ].join("\n");
+}
+
+async function writeDispatchBundle({ root, qualityDir, scorecard, patternsFile, configPathArg }) {
+  const dispatchDir = join(qualityDir, "dispatch");
+  const promptsDir = join(dispatchDir, "prompts");
+  const scorecardPath = join(qualityDir, "scorecard.json");
+  const patternsPath = join(qualityDir, "patterns.json");
+  const planPath = join(dispatchDir, "plan.json");
+  const toProjectPath = (absPath) => {
+    const relPath = relative(root, absPath);
+    return relPath === "" ? "." : relPath;
+  };
+  const scorecardProjectPath = toProjectPath(scorecardPath);
+  const patternsProjectPath = toProjectPath(patternsPath);
+  const planProjectPath = toProjectPath(planPath);
+
+  await mkdir(dispatchDir, { recursive: true });
+  await mkdir(promptsDir, { recursive: true });
+
+  const tasks = buildDispatchTasks(scorecard, patternsFile).map((task, index) => {
+    const ordinal = String(index + 1).padStart(2, "0");
+    const promptFile = `${ordinal}-${task.id}.md`;
+    const promptAbsPath = join(promptsDir, promptFile);
+    return {
+      ...task,
+      ordinal: index + 1,
+      promptPath: toProjectPath(promptAbsPath),
+      promptFile,
+    };
+  });
+
+  for (const task of tasks) {
+    const promptBody = renderDispatchPrompt(
+      task,
+      planProjectPath,
+      scorecardProjectPath,
+      patternsProjectPath,
+      configPathArg,
+    );
+    await writeFile(join(promptsDir, task.promptFile), promptBody, "utf8");
+  }
+
+  const plan = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    score: scorecard?.score?.overall ?? 0,
+    summary: {
+      actionItems: Array.isArray(scorecard?.actionItems) ? scorecard.actionItems.length : 0,
+      dispatchTasks: tasks.length,
+    },
+    inputs: {
+      configPath: configPathArg,
+      scorecardPath: scorecardProjectPath,
+      patternsPath: patternsProjectPath,
+    },
+    tasks,
+  };
+
+  await writeFile(planPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+
+  const queuePath = join(dispatchDir, "QUEUE.md");
+  const queueLines = [
+    "# Dispatch Queue",
+    "",
+    `Generated: ${plan.generatedAt}`,
+    `Quality Score: ${plan.score}`,
+    "",
+    "## Task Order",
+    ...tasks.map((task) => `${task.ordinal}. ${task.title} (${task.ownerProfile}) -> ${task.promptPath}`),
+    "",
+    "## How To Use",
+    "1. Assign top task to an agent and provide its prompt file.",
+    "2. Merge result, rerun `compound-quality reflect`, and use refreshed queue.",
+    "3. Repeat until queue has only maintenance/prevention tasks.",
+    "",
+  ];
+  await writeFile(queuePath, queueLines.join("\n"), "utf8");
+
+  return {
+    taskCount: tasks.length,
+    planPath: planProjectPath,
+    queuePath: toProjectPath(queuePath),
+  };
+}
+
 async function runReflect(configPathArg) {
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
@@ -519,6 +776,15 @@ async function runReflect(configPathArg) {
   console.log(`Quality score: ${scorecard.score.overall}`);
   console.log(`Coverage floor: ${scorecard.thresholds.coverageFloor}`);
   console.log(`Action items: ${scorecard.actionItems.length}`);
+  const dispatch = await writeDispatchBundle({
+    root,
+    qualityDir,
+    scorecard,
+    patternsFile,
+    configPathArg,
+  });
+  console.log(`Dispatch tasks: ${dispatch.taskCount}`);
+  console.log(`Dispatch plan: ${dispatch.planPath}`);
 
   const failedCommands = commandResults.filter((result) => result.exitCode !== 0);
   if (failedCommands.length > 0) {
@@ -555,6 +821,39 @@ async function runInit(configPathArg) {
   }
 }
 
+async function runDispatch(configPathArg) {
+  const root = resolve(process.cwd());
+  const configPath = resolve(root, configPathArg);
+  if (!existsSync(configPath)) {
+    await createDefaultConfig(configPath, root);
+  }
+
+  const userConfig = JSON.parse(await readFile(configPath, "utf8"));
+  const config = normalizeConfig(userConfig);
+  const qualityDir = join(root, config.qualityDir);
+  const scorecardPath = join(qualityDir, "scorecard.json");
+  const patternsPath = join(qualityDir, "patterns.json");
+
+  if (!existsSync(scorecardPath)) {
+    throw new Error(`Missing scorecard at ${scorecardPath}. Run "compound-quality reflect" first.`);
+  }
+  if (!existsSync(patternsPath)) {
+    throw new Error(`Missing patterns at ${patternsPath}. Run "compound-quality reflect" first.`);
+  }
+
+  const scorecard = JSON.parse(await readFile(scorecardPath, "utf8"));
+  const patternsFile = JSON.parse(await readFile(patternsPath, "utf8"));
+  const dispatch = await writeDispatchBundle({
+    root,
+    qualityDir,
+    scorecard,
+    patternsFile,
+    configPathArg,
+  });
+  console.log(`Dispatch tasks: ${dispatch.taskCount}`);
+  console.log(`Dispatch plan: ${dispatch.planPath}`);
+}
+
 async function main() {
   const { mode, configPath } = parseArgs(process.argv.slice(2));
   if (mode === "init") {
@@ -563,6 +862,10 @@ async function main() {
   }
   if (mode === "reflect") {
     await runReflect(configPath);
+    return;
+  }
+  if (mode === "dispatch") {
+    await runDispatch(configPath);
     return;
   }
   printUsage();

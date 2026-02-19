@@ -9,7 +9,7 @@ It runs your quality commands, computes a score, ratchets coverage floors, detec
 For internal teams, the lowest-friction path is install from a tagged GitHub release:
 
 ```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.4
+pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.6
 npx compound-quality init
 pnpm reflect
 ```
@@ -18,6 +18,7 @@ What this does:
 - installs a pinned version from the private repo,
 - creates `.compound-quality.json` if missing,
 - adds `"reflect"` script to your `package.json` if missing.
+- generates a prioritized dispatch queue for agents under `.quality/dispatch/`.
 
 ## Install (GitHub Packages)
 
@@ -95,6 +96,21 @@ compound-quality reflect --config .compound-quality.json
 ```
 
 If the config file does not exist yet, the CLI auto-creates `.compound-quality.json` with prefilled defaults and continues.
+`reflect` also generates dispatch artifacts to drive agent work automatically.
+
+To regenerate dispatch tasks from existing artifacts without rerunning checks:
+
+```bash
+compound-quality dispatch --config .compound-quality.json
+```
+
+## Systematic Agent Loop
+
+1. Run `pnpm reflect`.
+2. Open `.quality/dispatch/QUEUE.md`.
+3. Assign the top prompt from `.quality/dispatch/prompts/*.md` to an agent.
+4. Merge the fix, then rerun `pnpm reflect`.
+5. Repeat until only prevention/maintenance tasks remain.
 
 Or via package scripts:
 
@@ -138,6 +154,9 @@ A full ShellSwarm example is in `examples/shellswarm/.compound-quality.json`.
 - `.quality/patterns.json`
 - `.quality/reflections/*.md`
 - `.quality/suggested-updates/*.md`
+- `.quality/dispatch/plan.json`
+- `.quality/dispatch/QUEUE.md`
+- `.quality/dispatch/prompts/*.md`
 
 ## Behavior
 
