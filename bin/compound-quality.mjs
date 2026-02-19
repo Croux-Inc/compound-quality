@@ -22,6 +22,12 @@ const DEFAULT_PATTERN_RULES = [
   { key: "formatting_violation", pattern: "Formatter would have printed", flags: "gi" },
   { key: "missing_test_coverage", pattern: "coverage.*below|No test files found", flags: "gi" },
 ];
+const DEFAULT_COMMANDS = {
+  typecheck: "pnpm run typecheck",
+  lint: "pnpm run lint",
+  test: "pnpm run test -- --coverage",
+  build: "pnpm run build",
+};
 
 function printUsage() {
   console.log("Usage: compound-quality reflect --config <path>");
@@ -218,6 +224,68 @@ function normalizeConfig(userConfig) {
   };
 }
 
+async function discoverPackageDirs(root) {
+  const ignoredDirs = new Set([
+    "node_modules",
+    ".git",
+    ".quality",
+    "dist",
+    "build",
+    "coverage",
+    ".turbo",
+    ".next",
+  ]);
+
+  const packageDirs = [];
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (ignoredDirs.has(entry.name)) continue;
+    if (entry.name.startsWith(".")) continue;
+    if (existsSync(join(root, entry.name, "package.json"))) {
+      packageDirs.push(entry.name);
+    }
+  }
+
+  if (packageDirs.length > 0) return packageDirs;
+  if (existsSync(join(root, "package.json"))) return ["."];
+  return ["shared", "daemon", "web"];
+}
+
+async function createDefaultConfig(configPath, root) {
+  const rootPackageJson = await loadJson(join(root, "package.json"));
+  const scripts = rootPackageJson?.scripts ?? {};
+
+  const commands = {
+    typecheck: scripts.typecheck ? "pnpm run typecheck" : DEFAULT_COMMANDS.typecheck,
+    lint: scripts.lint ? "pnpm run lint" : DEFAULT_COMMANDS.lint,
+    test: scripts.test ? "pnpm run test -- --coverage" : DEFAULT_COMMANDS.test,
+    build: scripts.build ? "pnpm run build" : DEFAULT_COMMANDS.build,
+  };
+
+  const packageDirs = await discoverPackageDirs(root);
+  const defaultConfig = {
+    version: 1,
+    qualityDir: ".quality",
+    commands,
+    coverage: {
+      packageDirs,
+      summaryFile: "coverage/coverage-summary.json",
+      expectedPackages: packageDirs.length,
+    },
+    patterns: {
+      claudeRuleThreshold: 3,
+      lintRuleThreshold: 5,
+      rules: DEFAULT_PATTERN_RULES,
+    },
+    weights: DEFAULT_WEIGHTS,
+    maxSuggestedUpdateFiles: 25,
+  };
+
+  await writeFile(configPath, `${JSON.stringify(defaultConfig, null, 2)}\n`, "utf8");
+  console.log(`Created default config at ${configPath}`);
+}
+
 async function readCoveragePct(root, coverageConfig) {
   const values = [];
 
@@ -276,7 +344,7 @@ async function runReflect(configPathArg) {
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
   if (!existsSync(configPath)) {
-    throw new Error(`Config not found: ${configPath}`);
+    await createDefaultConfig(configPath, root);
   }
 
   const userConfig = JSON.parse(await readFile(configPath, "utf8"));

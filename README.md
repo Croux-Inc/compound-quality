@@ -35,7 +35,7 @@ pnpm add -D @croux-inc/compound-quality
 ### Option 2: Install directly from private GitHub repo
 
 ```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.2
+pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.3
 ```
 
 Pin to a tag (`#vX.Y.Z`) so all team members use the same version.
@@ -68,11 +68,13 @@ npm view @croux-inc/compound-quality version --registry=https://npm.pkg.github.c
 
 ## Usage
 
-Create `.compound-quality.json` in your repo, then run:
+Run the CLI from your repo root:
 
 ```bash
 compound-quality reflect --config .compound-quality.json
 ```
+
+If the config file does not exist yet, the CLI auto-creates `.compound-quality.json` with prefilled defaults and continues.
 
 Or via package scripts:
 
