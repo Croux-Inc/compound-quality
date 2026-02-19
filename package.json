@@ -1,6 +1,6 @@
 {
   "name": "@croux-inc/compound-quality",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Config-driven quality reflection CLI for compound engineering loops",
   "type": "module",
   "bin": {
@@ -14,13 +14,17 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/croux-inc/compound-quality.git"
+    "url": "git+https://github.com/Croux-Inc/compound-quality.git"
   },
-  "homepage": "https://github.com/croux-inc/compound-quality#readme",
+  "homepage": "https://github.com/Croux-Inc/compound-quality#readme",
   "bugs": {
-    "url": "https://github.com/croux-inc/compound-quality/issues"
+    "url": "https://github.com/Croux-Inc/compound-quality/issues"
   }
 }

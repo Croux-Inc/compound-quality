@@ -24,7 +24,7 @@ const DEFAULT_PATTERN_RULES = [
 ];
 
 function printUsage() {
-  console.log("Usage: node tools/compound-quality/cli.mjs reflect --config <path>");
+  console.log("Usage: compound-quality reflect --config <path>");
 }
 
 function parseArgs(argv) {
