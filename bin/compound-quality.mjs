@@ -844,7 +844,8 @@ async function runInit(configPathArg) {
   }
 }
 
-async function runDispatch(configPathArg) {
+async function runDispatch(configPathArg, options = {}) {
+  const asJson = options.json === true;
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
   if (!existsSync(configPath)) {
@@ -873,8 +874,23 @@ async function runDispatch(configPathArg) {
     patternsFile,
     configPathArg,
   });
-  console.log(`Dispatch tasks: ${dispatch.taskCount}`);
-  console.log(`Dispatch plan: ${dispatch.planPath}`);
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          action: "dispatch",
+          taskCount: dispatch.taskCount,
+          planPath: dispatch.planPath,
+          queuePath: dispatch.queuePath,
+        },
+        null,
+        2,
+      ),
+    );
+  } else {
+    console.log(`Dispatch tasks: ${dispatch.taskCount}`);
+    console.log(`Dispatch plan: ${dispatch.planPath}`);
+  }
 }
 
 async function runRalphLoop(configPathArg, actionArg, asJson = false) {
@@ -922,6 +938,19 @@ async function runRalphLoop(configPathArg, actionArg, asJson = false) {
   if (action === "start") {
     const nextControl = { version: 1, paused: false, updatedAt: new Date().toISOString() };
     await writeFile(controlPath, `${JSON.stringify(nextControl, null, 2)}\n`, "utf8");
+    const result = {
+      action: "start",
+      paused: false,
+      message: "Ralph loop resumed. Run 'compound-quality rw step' to execute the next loop cycle.",
+      controlPath: relative(root, controlPath),
+    };
+    if (asJson) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(result.message);
+      console.log(`Control file: ${result.controlPath}`);
+    }
+    return;
   }
 
   if (action === "status") {
@@ -949,8 +978,7 @@ async function runRalphLoop(configPathArg, actionArg, asJson = false) {
     return;
   }
 
-  const currentControl = (await loadJson(controlPath)) ?? control;
-  if (currentControl.paused) {
+  if (control.paused) {
     const pausedResult = {
       action: "step",
       paused: true,
@@ -1024,7 +1052,7 @@ async function main() {
     return;
   }
   if (mode === "dispatch") {
-    await runDispatch(configPath);
+    await runDispatch(configPath, { json });
     return;
   }
   if (mode === "ralph-loop" || mode === "rw" || mode === "ralph") {

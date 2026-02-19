@@ -9,7 +9,7 @@ It runs your quality commands, computes a score, ratchets coverage floors, detec
 For internal teams, the lowest-friction path is install from a tagged GitHub release:
 
 ```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.7
+pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.8
 npx compound-quality init
 pnpm reflect
 ```
@@ -123,6 +123,10 @@ compound-quality rw status
 compound-quality rw pause
 compound-quality rw start
 ```
+
+Behavior:
+- `rw start` resumes the loop only.
+- `rw step` runs one full loop cycle (`reflect` + dispatch regeneration).
 
 Outputs:
 - `.quality/dispatch/ralph-loop.json` (machine-readable current loop state)
