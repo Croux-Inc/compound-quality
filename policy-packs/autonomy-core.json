@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "name": "autonomy-core",
+  "description": "Language-agnostic autonomy verification baseline. Uses repo-provided commands and done-evidence schema.",
+  "verify": {
+    "enabled": true,
+    "requiredTaskEvidence": true,
+    "taskIdSources": ["cli", "env", "branch"],
+    "envTaskIdVar": "CQ_TASK_ID",
+    "gates": [
+      {
+        "id": "typecheck",
+        "type": "command",
+        "required": true,
+        "command": "${commands.typecheck}"
+      },
+      {
+        "id": "lint",
+        "type": "command",
+        "required": true,
+        "command": "${commands.lint}"
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "required": true,
+        "command": "${commands.test}"
+      },
+      {
+        "id": "build",
+        "type": "command",
+        "required": true,
+        "command": "${commands.build}"
+      },
+      {
+        "id": "done-evidence-schema",
+        "type": "json_schema",
+        "required": true,
+        "forEachTaskId": true,
+        "schemaFile": "${verify.evidenceSchemaFile}",
+        "dataFile": "${verify.doneEvidenceDir}/${taskId}.json"
+      }
+    ]
+  }
+}

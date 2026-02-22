@@ -35,5 +35,16 @@
     "coverageLevel": 0.2,
     "buildStability": 0.1
   },
-  "maxSuggestedUpdateFiles": 25
+  "maxSuggestedUpdateFiles": 25,
+  "verify": {
+    "enabled": true,
+    "policyPacks": ["builtin:autonomy-core"],
+    "requiredTaskEvidence": true,
+    "taskIdSources": ["cli", "env", "branch"],
+    "envTaskIdVar": "CQ_TASK_ID",
+    "doneEvidenceDir": ".quality/done-evidence",
+    "evidenceSchemaFile": "docs/engineering/schemas/autonomy-done-evidence.schema.json",
+    "waiversFile": ".quality/waivers.json",
+    "gates": []
+  }
 }

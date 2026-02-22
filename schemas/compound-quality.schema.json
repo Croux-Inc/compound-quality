@@ -64,7 +64,61 @@
       },
       "additionalProperties": true
     },
-    "maxSuggestedUpdateFiles": { "type": "number" }
+    "maxSuggestedUpdateFiles": { "type": "number" },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "policyPacks": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requiredTaskEvidence": { "type": "boolean" },
+        "taskIdPattern": { "type": "string" },
+        "taskIdSources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["cli", "env", "branch"]
+          }
+        },
+        "envTaskIdVar": { "type": "string" },
+        "doneEvidenceDir": { "type": "string" },
+        "evidenceSchemaFile": { "type": "string" },
+        "waiversFile": { "type": "string" },
+        "gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "type"],
+            "properties": {
+              "id": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["command", "custom_script", "file_exists", "json_schema", "regex"]
+              },
+              "required": { "type": "boolean" },
+              "enabled": { "type": "boolean" },
+              "forEachTaskId": { "type": "boolean" },
+              "command": { "type": "string" },
+              "path": { "type": "string" },
+              "paths": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "schemaFile": { "type": "string" },
+              "dataFile": { "type": "string" },
+              "file": { "type": "string" },
+              "pattern": { "type": "string" },
+              "flags": { "type": "string" },
+              "minMatches": { "type": "number" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

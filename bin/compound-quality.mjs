@@ -3,10 +3,30 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const PACKAGE_ROOT = resolve(__dirname, "..");
 
 const REQUIRED_COMMAND_NAMES = ["typecheck", "lint", "test", "build"];
+const DEFAULT_VERIFY_CONFIG = {
+  enabled: false,
+  policyPacks: [],
+  requiredTaskEvidence: false,
+  taskIdPattern: "\\b[A-Z][A-Z0-9]+-\\d+\\b",
+  taskIdSources: ["cli", "env", "branch"],
+  envTaskIdVar: "CQ_TASK_ID",
+  doneEvidenceDir: ".quality/done-evidence",
+  evidenceSchemaFile: "docs/engineering/schemas/autonomy-done-evidence.schema.json",
+  waiversFile: ".quality/waivers.json",
+  gates: [],
+};
+const BUILTIN_POLICY_PACKS = {
+  "autonomy-core": join(PACKAGE_ROOT, "policy-packs", "autonomy-core.json"),
+};
 const DEFAULT_WEIGHTS = {
   typeSafety: 0.25,
   testHealth: 0.3,
@@ -33,6 +53,7 @@ function printUsage() {
   console.log("Usage:");
   console.log("  compound-quality init --config <path>");
   console.log("  compound-quality reflect --config <path>");
+  console.log("  compound-quality verify --config <path> [--task-id <KEY>] [--json]");
   console.log("  compound-quality dispatch --config <path>");
   console.log("  compound-quality ralph-loop <start|pause|status|step> --config <path> [--json]");
   console.log("  compound-quality rw <start|pause|status|step> --config <path> [--json]");
@@ -43,11 +64,17 @@ function parseArgs(argv) {
   const mode = args.shift() ?? "reflect";
   let configPath = ".compound-quality.json";
   let json = false;
+  let taskId = "";
   const positionals = [];
 
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === "--config" && args[i + 1]) {
       configPath = args[i + 1];
+      i += 1;
+      continue;
+    }
+    if (args[i] === "--task-id" && args[i + 1]) {
+      taskId = args[i + 1];
       i += 1;
       continue;
     }
@@ -58,7 +85,7 @@ function parseArgs(argv) {
     positionals.push(args[i]);
   }
 
-  return { mode, configPath, action: positionals[0], json };
+  return { mode, configPath, action: positionals[0], json, taskId };
 }
 
 function countMatches(input, expression) {
@@ -293,6 +320,17 @@ async function createDefaultConfig(configPath, root, options = {}) {
     },
     weights: DEFAULT_WEIGHTS,
     maxSuggestedUpdateFiles: 25,
+    verify: {
+      enabled: false,
+      policyPacks: ["builtin:autonomy-core"],
+      requiredTaskEvidence: true,
+      taskIdSources: ["cli", "env", "branch"],
+      envTaskIdVar: "CQ_TASK_ID",
+      doneEvidenceDir: ".quality/done-evidence",
+      evidenceSchemaFile: "docs/engineering/schemas/autonomy-done-evidence.schema.json",
+      waiversFile: ".quality/waivers.json",
+      gates: [],
+    },
   };
 
   await writeFile(configPath, `${JSON.stringify(defaultConfig, null, 2)}\n`, "utf8");
@@ -353,6 +391,490 @@ function runCommand(root, name, command) {
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
+}
+
+function resolvePathFromRoot(root, pathLike) {
+  if (!pathLike || typeof pathLike !== "string") return "";
+  return isAbsolute(pathLike) ? pathLike : resolve(root, pathLike);
+}
+
+function truncateText(input, maxLength = 20000) {
+  if (typeof input !== "string") return "";
+  if (input.length <= maxLength) return input;
+  return `${input.slice(0, maxLength)}\n...[truncated ${input.length - maxLength} chars]`;
+}
+
+function getPathValue(input, pathExpr) {
+  if (!pathExpr) return undefined;
+  const parts = pathExpr.split(".");
+  let current = input;
+  for (const part of parts) {
+    if (current === null || current === undefined || typeof current !== "object") return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+function interpolateTemplate(input, context) {
+  if (typeof input !== "string") return input;
+  return input.replace(/\$\{([a-zA-Z0-9_.-]+)\}/g, (match, key) => {
+    const value = getPathValue(context, key);
+    if (value === undefined || value === null) return match;
+    return String(value);
+  });
+}
+
+function parseTaskIdPattern(value) {
+  const fallback = /\b[A-Z][A-Z0-9]+-\d+\b/g;
+  if (!value || typeof value !== "string") return fallback;
+  try {
+    return new RegExp(value, "g");
+  } catch {
+    return fallback;
+  }
+}
+
+function collectTaskIdsFromText(input, regex) {
+  if (!input || typeof input !== "string") return [];
+  const matches = input.match(regex) ?? [];
+  return [...new Set(matches)];
+}
+
+function getBranchName(root) {
+  if (process.env.GITHUB_HEAD_REF) return process.env.GITHUB_HEAD_REF;
+  if (process.env.GITHUB_REF_NAME) return process.env.GITHUB_REF_NAME;
+  const result = spawnSync("git rev-parse --abbrev-ref HEAD", {
+    cwd: root,
+    shell: true,
+    encoding: "utf8",
+  });
+  if ((result.status ?? 1) !== 0) return "";
+  return String(result.stdout ?? "").trim();
+}
+
+function mergeGates(baseGates, patchGates) {
+  const byId = new Map();
+  for (const gate of baseGates) {
+    if (!gate?.id) continue;
+    byId.set(gate.id, gate);
+  }
+  for (const gate of patchGates) {
+    if (!gate?.id) continue;
+    const existing = byId.get(gate.id) ?? {};
+    byId.set(gate.id, { ...existing, ...gate });
+  }
+  return [...byId.values()];
+}
+
+function applyVerifyPatch(base, patch) {
+  const next = { ...base };
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    if (key === "gates") continue;
+    if (value !== undefined) next[key] = value;
+  }
+  if (Array.isArray(patch?.gates)) {
+    next.gates = mergeGates(Array.isArray(next.gates) ? next.gates : [], patch.gates);
+  }
+  return next;
+}
+
+function resolvePolicyPackPath(root, reference) {
+  if (typeof reference !== "string" || reference.length === 0) {
+    throw new Error("Policy pack reference must be a non-empty string");
+  }
+  if (reference.startsWith("builtin:")) {
+    const key = reference.slice("builtin:".length);
+    const builtInPath = BUILTIN_POLICY_PACKS[key];
+    if (!builtInPath) throw new Error(`Unknown builtin policy pack: ${reference}`);
+    return builtInPath;
+  }
+  return resolvePathFromRoot(root, reference);
+}
+
+async function loadPolicyPack(root, reference) {
+  const packPath = resolvePolicyPackPath(root, reference);
+  if (!existsSync(packPath)) {
+    throw new Error(`Policy pack not found: ${reference} -> ${packPath}`);
+  }
+  const raw = await readFile(packPath, "utf8");
+  const parsed = JSON.parse(raw);
+  const verifyConfig = parsed?.verify ?? parsed;
+  if (!verifyConfig || typeof verifyConfig !== "object") {
+    throw new Error(`Policy pack does not contain a verify config object: ${reference}`);
+  }
+  return {
+    reference,
+    path: packPath,
+    verify: verifyConfig,
+  };
+}
+
+async function normalizeVerifyConfig(root, userConfig, normalizedConfig) {
+  const repoVerify = userConfig?.verify ?? {};
+  const packRefs = Array.isArray(repoVerify.policyPacks) ? repoVerify.policyPacks : [];
+  let merged = { ...DEFAULT_VERIFY_CONFIG };
+  const loadedPolicyPacks = [];
+  for (const packRef of packRefs) {
+    const pack = await loadPolicyPack(root, packRef);
+    loadedPolicyPacks.push({ reference: pack.reference, path: relative(root, pack.path) });
+    merged = applyVerifyPatch(merged, pack.verify);
+  }
+  merged = applyVerifyPatch(merged, repoVerify);
+  merged.policyPacks = packRefs;
+  merged.loadedPolicyPacks = loadedPolicyPacks;
+  if (!Array.isArray(merged.gates)) {
+    merged.gates = [];
+  }
+  if (!Array.isArray(merged.taskIdSources) || merged.taskIdSources.length === 0) {
+    merged.taskIdSources = DEFAULT_VERIFY_CONFIG.taskIdSources;
+  }
+  merged.commands = Object.fromEntries(normalizedConfig.commands.map((entry) => [entry.name, entry.command]));
+  return merged;
+}
+
+function resolveTaskIds(root, verifyConfig, options) {
+  const taskIdRegex = parseTaskIdPattern(verifyConfig.taskIdPattern);
+  const taskIds = new Set();
+  const sources = new Set(verifyConfig.taskIdSources ?? []);
+  if (sources.has("cli") && options.taskId) {
+    for (const value of collectTaskIdsFromText(options.taskId, taskIdRegex)) {
+      taskIds.add(value);
+    }
+  }
+  if (sources.has("env")) {
+    const envVar = verifyConfig.envTaskIdVar || "CQ_TASK_ID";
+    for (const value of collectTaskIdsFromText(process.env[envVar], taskIdRegex)) {
+      taskIds.add(value);
+    }
+  }
+  if (sources.has("branch")) {
+    for (const value of collectTaskIdsFromText(getBranchName(root), taskIdRegex)) {
+      taskIds.add(value);
+    }
+  }
+  return [...taskIds];
+}
+
+async function loadWaivers(root, waiversFile) {
+  const fullPath = resolvePathFromRoot(root, waiversFile);
+  if (!fullPath || !existsSync(fullPath)) return [];
+  const raw = await readFile(fullPath, "utf8");
+  const parsed = JSON.parse(raw);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.waivers)) return parsed.waivers;
+  throw new Error(`Waivers file must be an array or object with "waivers" array: ${waiversFile}`);
+}
+
+function findMatchingWaiver(waivers, gateResult, taskIds) {
+  for (const waiver of waivers) {
+    if (!waiver || typeof waiver !== "object") continue;
+    const gateMatch = waiver.gateId === gateResult.id || waiver.gateId === "*";
+    if (!gateMatch) continue;
+    const taskIdMatch =
+      !waiver.taskId || waiver.taskId === "*" || taskIds.length === 0 || taskIds.includes(String(waiver.taskId));
+    if (!taskIdMatch) continue;
+    if (waiver.expiresAt) {
+      const expiry = new Date(waiver.expiresAt);
+      if (!Number.isNaN(expiry.getTime()) && Date.now() > expiry.getTime()) {
+        continue;
+      }
+    }
+    return waiver;
+  }
+  return null;
+}
+
+function createValidationError(path, message) {
+  return `${path}: ${message}`;
+}
+
+function resolveSchemaRef(rootSchema, ref) {
+  if (typeof ref !== "string" || !ref.startsWith("#/")) return null;
+  const parts = ref.slice(2).split("/");
+  let current = rootSchema;
+  for (const rawPart of parts) {
+    const part = rawPart.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (current === null || current === undefined || typeof current !== "object") return null;
+    current = current[part];
+  }
+  return current;
+}
+
+function matchesSchema(schema, data, rootSchema) {
+  const errors = [];
+  validateSchemaNode(schema, data, "$", rootSchema, errors);
+  return errors.length === 0;
+}
+
+function validateSchemaNode(schema, data, path, rootSchema, errors) {
+  if (!schema || typeof schema !== "object") return;
+
+  if (schema.$ref) {
+    const resolved = resolveSchemaRef(rootSchema, schema.$ref);
+    if (!resolved) {
+      errors.push(createValidationError(path, `unresolved $ref ${schema.$ref}`));
+      return;
+    }
+    validateSchemaNode(resolved, data, path, rootSchema, errors);
+    return;
+  }
+
+  if (Array.isArray(schema.allOf)) {
+    for (const subSchema of schema.allOf) {
+      validateSchemaNode(subSchema, data, path, rootSchema, errors);
+    }
+  }
+
+  if (schema.if && schema.then && matchesSchema(schema.if, data, rootSchema)) {
+    validateSchemaNode(schema.then, data, path, rootSchema, errors);
+  }
+
+  if (schema.const !== undefined) {
+    if (JSON.stringify(data) !== JSON.stringify(schema.const)) {
+      errors.push(createValidationError(path, "does not match const value"));
+    }
+  }
+
+  if (schema.enum && Array.isArray(schema.enum) && !schema.enum.some((entry) => JSON.stringify(entry) === JSON.stringify(data))) {
+    errors.push(createValidationError(path, `must be one of: ${schema.enum.map((entry) => JSON.stringify(entry)).join(", ")}`));
+  }
+
+  const expectedType = schema.type;
+  if (expectedType) {
+    const actualType = Array.isArray(data) ? "array" : data === null ? "null" : typeof data;
+    const typeMatches =
+      expectedType === actualType ||
+      (expectedType === "number" && actualType === "number") ||
+      (expectedType === "integer" && Number.isInteger(data));
+    if (!typeMatches) {
+      errors.push(createValidationError(path, `expected type ${expectedType}, got ${actualType}`));
+      return;
+    }
+  }
+
+  if (typeof data === "string") {
+    if (typeof schema.minLength === "number" && data.length < schema.minLength) {
+      errors.push(createValidationError(path, `must have minLength ${schema.minLength}`));
+    }
+    if (schema.pattern) {
+      try {
+        const regex = new RegExp(schema.pattern);
+        if (!regex.test(data)) {
+          errors.push(createValidationError(path, `does not match pattern ${schema.pattern}`));
+        }
+      } catch {
+        errors.push(createValidationError(path, `invalid pattern ${schema.pattern}`));
+      }
+    }
+  }
+
+  if (Array.isArray(data)) {
+    if (typeof schema.minItems === "number" && data.length < schema.minItems) {
+      errors.push(createValidationError(path, `must have minItems ${schema.minItems}`));
+    }
+    if (schema.items) {
+      data.forEach((item, index) => {
+        validateSchemaNode(schema.items, item, `${path}[${index}]`, rootSchema, errors);
+      });
+    }
+  }
+
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    for (const key of required) {
+      if (!Object.prototype.hasOwnProperty.call(data, key)) {
+        errors.push(createValidationError(path, `missing required property "${key}"`));
+      }
+    }
+
+    const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.prototype.hasOwnProperty.call(data, key)) {
+        validateSchemaNode(propertySchema, data[key], `${path}.${key}`, rootSchema, errors);
+      }
+    }
+
+    if (schema.additionalProperties === false) {
+      const allowed = new Set(Object.keys(properties));
+      for (const key of Object.keys(data)) {
+        if (!allowed.has(key)) {
+          errors.push(createValidationError(path, `unexpected property "${key}"`));
+        }
+      }
+    }
+  }
+}
+
+function validateJsonAgainstSchema(schema, data) {
+  const errors = [];
+  validateSchemaNode(schema, data, "$", schema, errors);
+  return errors;
+}
+
+async function evaluateVerifyGate(root, gate, context) {
+  const startedAt = Date.now();
+  const required = gate.required !== false;
+  const targetTaskIds = gate.forEachTaskId ? context.taskIds : [context.taskId ?? ""];
+
+  try {
+    if (gate.type === "command" || gate.type === "custom_script") {
+      const command = interpolateTemplate(gate.command, context);
+      const result = runCommand(root, gate.id, command);
+      return {
+        id: gate.id,
+        type: gate.type,
+        required,
+        status: result.exitCode === 0 ? "pass" : "fail",
+        durationMs: Date.now() - startedAt,
+        command,
+        exitCode: result.exitCode,
+        message: result.exitCode === 0 ? "command passed" : "command failed",
+        stdout: truncateText(result.stdout),
+        stderr: truncateText(result.stderr),
+      };
+    }
+
+    if (gate.type === "file_exists") {
+      const paths = [];
+      const configured = Array.isArray(gate.paths) ? gate.paths : gate.path ? [gate.path] : [];
+      for (const taskId of targetTaskIds.length > 0 ? targetTaskIds : [""]) {
+        for (const entry of configured) {
+          const resolved = resolvePathFromRoot(root, interpolateTemplate(entry, { ...context, taskId }));
+          paths.push({ taskId, path: resolved });
+        }
+      }
+      const missing = paths.filter((entry) => !existsSync(entry.path));
+      return {
+        id: gate.id,
+        type: gate.type,
+        required,
+        status: missing.length === 0 ? "pass" : "fail",
+        durationMs: Date.now() - startedAt,
+        message:
+          missing.length === 0
+            ? `all files exist (${paths.length})`
+            : `missing files: ${missing.map((entry) => relative(root, entry.path)).join(", ")}`,
+        checks: paths.map((entry) => ({
+          taskId: entry.taskId || null,
+          path: relative(root, entry.path),
+          exists: existsSync(entry.path),
+        })),
+      };
+    }
+
+    if (gate.type === "regex") {
+      const filePath = resolvePathFromRoot(root, interpolateTemplate(gate.file, context));
+      if (!existsSync(filePath)) {
+        return {
+          id: gate.id,
+          type: gate.type,
+          required,
+          status: "fail",
+          durationMs: Date.now() - startedAt,
+          message: `file not found: ${relative(root, filePath)}`,
+        };
+      }
+      const content = await readFile(filePath, "utf8");
+      const flags = typeof gate.flags === "string" ? gate.flags : "g";
+      const regex = new RegExp(gate.pattern, flags);
+      const matchCount = (content.match(regex) ?? []).length;
+      const minMatches = typeof gate.minMatches === "number" ? gate.minMatches : 1;
+      const passed = matchCount >= minMatches;
+      return {
+        id: gate.id,
+        type: gate.type,
+        required,
+        status: passed ? "pass" : "fail",
+        durationMs: Date.now() - startedAt,
+        message: passed
+          ? `pattern matched ${matchCount} time(s)`
+          : `pattern matched ${matchCount} time(s), expected >= ${minMatches}`,
+        file: relative(root, filePath),
+      };
+    }
+
+    if (gate.type === "json_schema") {
+      const schemaPath = resolvePathFromRoot(root, interpolateTemplate(gate.schemaFile, context));
+      if (!existsSync(schemaPath)) {
+        return {
+          id: gate.id,
+          type: gate.type,
+          required,
+          status: "fail",
+          durationMs: Date.now() - startedAt,
+          message: `schema file not found: ${relative(root, schemaPath)}`,
+        };
+      }
+      const schemaRaw = await readFile(schemaPath, "utf8");
+      const schema = JSON.parse(schemaRaw);
+      const taskIds = targetTaskIds.length > 0 ? targetTaskIds : [""];
+      const checks = [];
+      for (const taskId of taskIds) {
+        const dataPath = resolvePathFromRoot(root, interpolateTemplate(gate.dataFile, { ...context, taskId }));
+        if (!existsSync(dataPath)) {
+          checks.push({
+            taskId: taskId || null,
+            file: relative(root, dataPath),
+            valid: false,
+            errors: ["file not found"],
+          });
+          continue;
+        }
+        const dataRaw = await readFile(dataPath, "utf8");
+        let parsed;
+        try {
+          parsed = JSON.parse(dataRaw);
+        } catch (error) {
+          checks.push({
+            taskId: taskId || null,
+            file: relative(root, dataPath),
+            valid: false,
+            errors: [`invalid JSON: ${String(error)}`],
+          });
+          continue;
+        }
+        const errors = validateJsonAgainstSchema(schema, parsed);
+        checks.push({
+          taskId: taskId || null,
+          file: relative(root, dataPath),
+          valid: errors.length === 0,
+          errors,
+        });
+      }
+      const failed = checks.filter((entry) => !entry.valid);
+      return {
+        id: gate.id,
+        type: gate.type,
+        required,
+        status: failed.length === 0 ? "pass" : "fail",
+        durationMs: Date.now() - startedAt,
+        message:
+          failed.length === 0
+            ? `schema validation passed (${checks.length} file(s))`
+            : `schema validation failed (${failed.length}/${checks.length} file(s))`,
+        schemaFile: relative(root, schemaPath),
+        checks,
+      };
+    }
+
+    return {
+      id: gate.id,
+      type: gate.type,
+      required,
+      status: "fail",
+      durationMs: Date.now() - startedAt,
+      message: `unsupported gate type "${gate.type}"`,
+    };
+  } catch (error) {
+    return {
+      id: gate.id,
+      type: gate.type,
+      required,
+      status: "fail",
+      durationMs: Date.now() - startedAt,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 function slugify(input) {
@@ -809,6 +1331,117 @@ async function runReflect(configPathArg, options = {}) {
   }
 }
 
+async function runVerify(configPathArg, options = {}) {
+  const asJson = options.json === true;
+  const root = resolve(process.cwd());
+  const configPath = resolve(root, configPathArg);
+  if (!existsSync(configPath)) {
+    await createDefaultConfig(configPath, root, { silent: asJson });
+  }
+
+  const userConfig = JSON.parse(await readFile(configPath, "utf8"));
+  const config = normalizeConfig(userConfig);
+  const verifyConfig = await normalizeVerifyConfig(root, userConfig, config);
+  const qualityDir = join(root, config.qualityDir);
+  await mkdir(qualityDir, { recursive: true });
+
+  if (!verifyConfig.enabled) {
+    const disabledResult = {
+      action: "verify",
+      enabled: false,
+      message: "Verify mode is disabled in config (verify.enabled=false).",
+    };
+    if (asJson) {
+      console.log(JSON.stringify(disabledResult, null, 2));
+    } else {
+      console.log(disabledResult.message);
+    }
+    return;
+  }
+
+  const taskIds = resolveTaskIds(root, verifyConfig, options);
+  const taskIdFailure = verifyConfig.requiredTaskEvidence && taskIds.length === 0;
+  const waivers = await loadWaivers(root, verifyConfig.waiversFile);
+
+  const context = {
+    qualityDir: config.qualityDir,
+    commands: verifyConfig.commands,
+    taskId: taskIds[0] ?? "",
+    taskIds,
+    verify: verifyConfig,
+  };
+
+  const gateResults = [];
+  for (const gate of verifyConfig.gates) {
+    if (!gate || typeof gate !== "object") continue;
+    if (!gate.id || !gate.type) continue;
+    if (gate.enabled === false) continue;
+    const result = await evaluateVerifyGate(root, gate, context);
+    if (result.status === "fail") {
+      const waiver = findMatchingWaiver(waivers, result, taskIds);
+      if (waiver) {
+        gateResults.push({
+          ...result,
+          status: "waived",
+          waiver: {
+            gateId: waiver.gateId ?? result.id,
+            taskId: waiver.taskId ?? null,
+            reason: waiver.reason ?? "",
+            approvedBy: waiver.approvedBy ?? "",
+            expiresAt: waiver.expiresAt ?? null,
+          },
+        });
+        continue;
+      }
+    }
+    gateResults.push(result);
+  }
+
+  const failedRequiredGates = gateResults.filter((result) => result.required && result.status === "fail");
+  const verification = {
+    version: 1,
+    verifiedAt: new Date().toISOString(),
+    configPath: relative(root, configPath),
+    enabled: true,
+    taskIds,
+    policyPacks: verifyConfig.loadedPolicyPacks,
+    missingTaskId: taskIdFailure,
+    gateCounts: {
+      total: gateResults.length,
+      passed: gateResults.filter((result) => result.status === "pass").length,
+      failed: gateResults.filter((result) => result.status === "fail").length,
+      waived: gateResults.filter((result) => result.status === "waived").length,
+    },
+    failures: {
+      missingTaskId: taskIdFailure,
+      requiredGateFailures: failedRequiredGates.length,
+    },
+    waiversFile: verifyConfig.waiversFile,
+    gates: gateResults,
+  };
+
+  const verificationPath = join(qualityDir, "verification.json");
+  await writeFile(verificationPath, `${JSON.stringify(verification, null, 2)}\n`, "utf8");
+
+  const failed = taskIdFailure || failedRequiredGates.length > 0;
+  if (asJson) {
+    console.log(JSON.stringify(verification, null, 2));
+  } else {
+    console.log(`Verify gates: ${verification.gateCounts.total}`);
+    console.log(`Passed: ${verification.gateCounts.passed}`);
+    console.log(`Waived: ${verification.gateCounts.waived}`);
+    console.log(`Failed: ${verification.gateCounts.failed}`);
+    if (taskIdFailure) {
+      console.log("Missing required task ID for evidence-linked verification.");
+    }
+    console.log(`Verification artifact: ${relative(root, verificationPath)}`);
+  }
+
+  if (failed) {
+    process.exitCode = 1;
+  }
+}
+
 async function runInit(configPathArg) {
   const root = resolve(process.cwd());
   const configPath = resolve(root, configPathArg);
@@ -841,6 +1474,12 @@ async function runInit(configPathArg) {
     rootPackageJson.scripts = scripts;
     await writeFile(rootPackagePath, `${JSON.stringify(rootPackageJson, null, 2)}\n`, "utf8");
     console.log('Added script "reflect:rw" to package.json');
+  }
+  if (!scripts["verify:quality"]) {
+    scripts["verify:quality"] = `compound-quality verify --config ${configPathArg}`;
+    rootPackageJson.scripts = scripts;
+    await writeFile(rootPackagePath, `${JSON.stringify(rootPackageJson, null, 2)}\n`, "utf8");
+    console.log('Added script "verify:quality" to package.json');
   }
 }
 
@@ -1042,13 +1681,17 @@ async function runRalphLoop(configPathArg, actionArg, asJson = false) {
 }
 
 async function main() {
-  const { mode, configPath, action, json } = parseArgs(process.argv.slice(2));
+  const { mode, configPath, action, json, taskId } = parseArgs(process.argv.slice(2));
   if (mode === "init") {
     await runInit(configPath);
     return;
   }
   if (mode === "reflect") {
     await runReflect(configPath);
+    return;
+  }
+  if (mode === "verify") {
+    await runVerify(configPath, { json, taskId });
     return;
   }
   if (mode === "dispatch") {

@@ -3,13 +3,14 @@
 Config-driven CLI for a compound engineering quality loop.
 
 It runs your quality commands, computes a score, ratchets coverage floors, detects repeated patterns, and writes artifacts to `.quality/`.
+It can also run policy-driven autonomy verification gates (including per-task done-evidence schema checks).
 
 ## Quickstart (Recommended)
 
 For internal teams, the lowest-friction path is install from a tagged GitHub release:
 
 ```bash
-pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.8
+pnpm add -D git+ssh://git@github.com/Croux-Inc/compound-quality.git#v0.1.9
 npx compound-quality init
 pnpm reflect
 ```
@@ -105,6 +106,18 @@ To regenerate dispatch tasks from existing artifacts without rerunning checks:
 compound-quality dispatch --config .compound-quality.json
 ```
 
+Run autonomy verification gates:
+
+```bash
+compound-quality verify --config .compound-quality.json --task-id CRO-123
+```
+
+Or rely on `CQ_TASK_ID` / branch naming conventions:
+
+```bash
+CQ_TASK_ID=CRO-123 compound-quality verify --config .compound-quality.json
+```
+
 ## Systematic Agent Loop
 
 1. Run `pnpm reflect`.
@@ -164,6 +177,17 @@ Minimal example:
     "packageDirs": ["shared", "daemon", "web"],
     "summaryFile": "coverage/coverage-summary.json",
     "expectedPackages": 3
+  },
+  "verify": {
+    "enabled": true,
+    "policyPacks": ["builtin:autonomy-core"],
+    "requiredTaskEvidence": true,
+    "taskIdSources": ["cli", "env", "branch"],
+    "envTaskIdVar": "CQ_TASK_ID",
+    "doneEvidenceDir": ".quality/done-evidence",
+    "evidenceSchemaFile": "docs/engineering/schemas/autonomy-done-evidence.schema.json",
+    "waiversFile": ".quality/waivers.json",
+    "gates": []
   }
 }
 ```
@@ -173,6 +197,7 @@ A full ShellSwarm example is in `examples/shellswarm/.compound-quality.json`.
 ## Output
 
 - `.quality/scorecard.json`
+- `.quality/verification.json` (when running `verify`)
 - `.quality/patterns.json`
 - `.quality/reflections/*.md`
 - `.quality/suggested-updates/*.md`
@@ -183,6 +208,10 @@ A full ShellSwarm example is in `examples/shellswarm/.compound-quality.json`.
 ## Behavior
 
 - Coverage floor ratchets only on qualified full coverage runs.
+- `verify` runs configurable gates (`command`, `file_exists`, `json_schema`, `regex`, `custom_script`) and fails closed on required-gate failures.
+- `json_schema` gates support the common object/array/required/pattern/$ref/allOf/if+then subset used by autonomy evidence schemas; use `custom_script` for stricter or nonstandard validators.
+- Built-in policy packs can define org-wide standards; repo-level config can override/extend gates.
+- Task-linked done evidence can be enforced via `requiredTaskEvidence` + schema gates.
 - Pattern promotions:
   - `>= 3` sightings: suggest CLAUDE rule
   - `>= 5` sightings: suggest lint rule
